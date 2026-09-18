@@ -60,6 +60,48 @@ async function updateBadge() {
   }
 }
 
+// ─── Opera "Speed Dial" redirect workaround ───────────────────────────────────
+//
+// Opera does NOT support the standard "chrome_url_overrides.newtab" manifest
+// key, so new tabs still load Opera's internal Speed Dial page instead of
+// index.html. Opera's internal URL for that page is "chrome://startpageshared/"
+// (confirmed via runtime logging — some older Opera docs/forums reference
+// "chrome://startpage/" instead, so both variants are matched below for
+// compatibility across Opera versions).
+//
+// Workaround: watch for tabs landing on that URL and immediately redirect
+// them to our own newtab page. This has no effect in Chrome/Edge/Brave,
+// where the manifest override already does the job and tabs never show
+// this URL in the first place — so it's safe to leave in for everyone.
+
+const OWN_NEWTAB_URL = chrome.runtime.getURL('index.html');
+
+const STARTPAGE_PATTERNS = [
+  'chrome://startpageshared/', // confirmed for this Opera build
+  'chrome://startpage/',       // older/alternate Opera builds
+];
+
+function looksLikeStartpage(url) {
+  if (!url) return false;
+  return STARTPAGE_PATTERNS.some((p) => url.startsWith(p));
+}
+
+function redirectIfOperaStartpage(tabId, url) {
+  if (looksLikeStartpage(url)) {
+    chrome.tabs.update(tabId, { url: OWN_NEWTAB_URL });
+  }
+}
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.id !== undefined) {
+    redirectIfOperaStartpage(tab.id, tab.url || tab.pendingUrl);
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  redirectIfOperaStartpage(tabId, changeInfo.url || tab.url || tab.pendingUrl);
+});
+
 // ─── Event listeners ──────────────────────────────────────────────────────────
 
 // Update badge when the extension is first installed
