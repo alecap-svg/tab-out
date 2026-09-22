@@ -40,11 +40,16 @@ async function fetchOpenTabs() {
 
     const tabs = await chrome.tabs.query({});
     openTabs = tabs.map(t => ({
-      id:       t.id,
-      url:      t.url,
-      title:    t.title,
-      windowId: t.windowId,
-      active:   t.active,
+      id:        t.id,
+      url:       t.url,
+      title:     t.title,
+      windowId:  t.windowId,
+      active:    t.active,
+      // Resource Saver needs these to know which tabs are safe to pause
+      // and which are already asleep (discarded from memory by Chrome).
+      discarded: t.discarded === true,
+      pinned:    t.pinned === true,
+      audible:   t.audible === true,
       // Flag Tab Out's own pages so we can detect duplicate new tabs
       isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
     }));
@@ -195,6 +200,140 @@ async function closeTabOutDupes() {
   const toClose = tabOutTabs.filter(t => t.id !== keep.id).map(t => t.id);
   if (toClose.length > 0) await chrome.tabs.remove(toClose);
   await fetchOpenTabs();
+}
+
+
+/* ----------------------------------------------------------------
+   RESOURCE SAVER — pause inactive tabs to free up memory
+
+   Uses chrome.tabs.discard() to unload a background tab's page from
+   memory while keeping it in the tab strip. Chrome reloads it
+   automatically the next time you switch to it — nothing is closed.
+
+   Never touches: the tab you're currently looking at, pinned tabs,
+   tabs playing audio, or tabs that are already asleep.
+   ---------------------------------------------------------------- */
+
+/**
+ * isRealTabUrl(url)
+ *
+ * True for ordinary web pages; false for chrome://, extension pages,
+ * about:blank, etc. Shared by getRealTabs() and the pause eligibility
+ * check below so both agree on what counts as a "real" tab.
+ */
+function isRealTabUrl(url) {
+  url = url || '';
+  return (
+    !url.startsWith('chrome://') &&
+    !url.startsWith('chrome-extension://') &&
+    !url.startsWith('about:') &&
+    !url.startsWith('edge://') &&
+    !url.startsWith('brave://')
+  );
+}
+
+/**
+ * canPauseTab(tab)
+ *
+ * True if this tab is safe to discard: not already sleeping, not the
+ * active tab, not pinned, not playing audio, and a real web page.
+ */
+function canPauseTab(tab) {
+  if (!tab) return false;
+  return (
+    !tab.discarded &&
+    !tab.active &&
+    !tab.pinned &&
+    !tab.audible &&
+    isRealTabUrl(tab.url)
+  );
+}
+
+/**
+ * pauseTabsByIds(tabIds)
+ *
+ * Discards the given tabs (by Chrome tab id) if they're eligible.
+ * Skips — rather than fails on — tabs that shouldn't be paused,
+ * and tallies why so the caller can show a clear toast message.
+ */
+async function pauseTabsByIds(tabIds) {
+  const ids = [...new Set((tabIds || []).map(id => Number(id)).filter(Number.isInteger))];
+  const result = { paused: 0, alreadySleeping: 0, current: 0, pinned: 0, audible: 0, unavailable: 0 };
+
+  for (const id of ids) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(id);
+    } catch {
+      result.unavailable += 1;
+      continue;
+    }
+
+    if (tab.discarded)      { result.alreadySleeping += 1; continue; }
+    if (tab.active)         { result.current += 1; continue; }
+    if (tab.pinned)         { result.pinned += 1; continue; }
+    if (tab.audible)        { result.audible += 1; continue; }
+    if (!isRealTabUrl(tab.url)) { result.unavailable += 1; continue; }
+
+    try {
+      const discarded = await chrome.tabs.discard(id);
+      if (discarded && discarded.discarded) result.paused += 1;
+      else result.unavailable += 1;
+    } catch {
+      result.unavailable += 1;
+    }
+  }
+
+  await fetchOpenTabs();
+  return result;
+}
+
+/**
+ * pauseAllInactiveTabs()
+ *
+ * Pauses every currently-eligible tab in one go — the "Pause inactive
+ * tabs" button in the Resource Saver banner.
+ */
+async function pauseAllInactiveTabs() {
+  const ids = getRealTabs().filter(canPauseTab).map(t => t.id);
+  return pauseTabsByIds(ids);
+}
+
+/**
+ * pauseResultMessage(result)
+ *
+ * Turns a pauseTabsByIds() result into a short toast message.
+ */
+function pauseResultMessage(result) {
+  if (result.paused > 0) {
+    return `Paused ${result.paused} tab${result.paused !== 1 ? 's' : ''}`;
+  }
+  if (result.current)         return "Can't pause the tab you're looking at";
+  if (result.audible)         return 'Tabs playing audio stay awake';
+  if (result.pinned)          return 'Pinned tabs stay awake';
+  if (result.alreadySleeping) return 'Already sleeping';
+  return 'Nothing to pause';
+}
+
+/**
+ * updateResourceSaverBanner()
+ *
+ * Shows/hides the Resource Saver banner and keeps its count current.
+ * Called from renderStaticDashboard() after every tab-list refresh.
+ */
+function updateResourceSaverBanner() {
+  const banner  = document.getElementById('resourceSaverBanner');
+  const countEl = document.getElementById('resourceSaverCount');
+  if (!banner) return;
+
+  const pausable = getRealTabs().filter(canPauseTab).length;
+
+  if (pausable > 0) {
+    if (countEl) countEl.textContent = pausable;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
 }
 
 
@@ -700,6 +839,7 @@ const ICONS = {
   close:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>`,
   archive: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg>`,
   focus:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" /></svg>`,
+  sleep:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" /></svg>`,
 };
 
 
@@ -720,16 +860,7 @@ let domainGroups = [];
  * pages, about:blank, etc.
  */
 function getRealTabs() {
-  return openTabs.filter(t => {
-    const url = t.url || '';
-    return (
-      !url.startsWith('chrome://') &&
-      !url.startsWith('chrome-extension://') &&
-      !url.startsWith('about:') &&
-      !url.startsWith('edge://') &&
-      !url.startsWith('brave://')
-    );
-  });
+  return openTabs.filter(t => isRealTabUrl(t.url));
 }
 
 /**
@@ -762,16 +893,23 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     const label    = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), '');
     const count    = urlCounts[tab.url] || 1;
     const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
-    const chipClass = count > 1 ? ' chip-has-dupes' : '';
+    const chipClass = (count > 1 ? ' chip-has-dupes' : '') + (tab.discarded ? ' chip-sleeping' : '');
     const safeUrl   = (tab.url || '').replace(/"/g, '&quot;');
     const safeTitle = label.replace(/"/g, '&quot;');
     let domain = '';
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+    const sleepBadge = tab.discarded
+      ? `<span class="chip-sleep-badge" title="Paused — will reload when you click it">${ICONS.sleep}</span>`
+      : '';
+    const pauseBtn = canPauseTab(tab)
+      ? `<button class="chip-action chip-pause" data-action="pause-single-tab" data-tab-id="${tab.id}" title="Pause this tab">${ICONS.sleep}</button>`
+      : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
+      <span class="chip-text">${label}</span>${dupeTag}${sleepBadge}
       <div class="chip-actions">
+        ${pauseBtn}
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
         </button>
@@ -843,16 +981,23 @@ function renderDomainCard(group) {
     } catch {}
     const count    = urlCounts[tab.url];
     const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
-    const chipClass = count > 1 ? ' chip-has-dupes' : '';
+    const chipClass = (count > 1 ? ' chip-has-dupes' : '') + (tab.discarded ? ' chip-sleeping' : '');
     const safeUrl   = (tab.url || '').replace(/"/g, '&quot;');
     const safeTitle = label.replace(/"/g, '&quot;');
     let domain = '';
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+    const sleepBadge = tab.discarded
+      ? `<span class="chip-sleep-badge" title="Paused — will reload when you click it">${ICONS.sleep}</span>`
+      : '';
+    const pauseBtn = canPauseTab(tab)
+      ? `<button class="chip-action chip-pause" data-action="pause-single-tab" data-tab-id="${tab.id}" title="Pause this tab">${ICONS.sleep}</button>`
+      : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
+      <span class="chip-text">${label}</span>${dupeTag}${sleepBadge}
       <div class="chip-actions">
+        ${pauseBtn}
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
         </button>
@@ -1030,6 +1175,9 @@ async function renderStaticDashboard() {
   await fetchOpenTabs();
   const realTabs = getRealTabs();
 
+  // --- Resource Saver banner (how many tabs could be paused right now) ---
+  updateResourceSaverBanner();
+
   // --- Group tabs by domain ---
   // Landing pages (Gmail inbox, Twitter home, etc.) get their own special group
   // so they can be closed together without affecting content tabs on the same domain.
@@ -1199,6 +1347,25 @@ document.addEventListener('click', async (e) => {
       setTimeout(() => { banner.style.display = 'none'; banner.style.opacity = '1'; }, 400);
     }
     showToast('Closed extra Tab Out tabs');
+    return;
+  }
+
+  // ---- Resource Saver: pause every eligible inactive tab ----
+  if (action === 'pause-inactive-tabs') {
+    const result = await pauseAllInactiveTabs();
+    showToast(pauseResultMessage(result));
+    await renderDashboard();
+    return;
+  }
+
+  // ---- Resource Saver: pause a single tab from its chip ----
+  if (action === 'pause-single-tab') {
+    e.stopPropagation();
+    const tabId = Number(actionEl.dataset.tabId);
+    if (!Number.isInteger(tabId)) return;
+    const result = await pauseTabsByIds([tabId]);
+    showToast(pauseResultMessage(result));
+    await renderDashboard();
     return;
   }
 
@@ -1474,6 +1641,76 @@ document.addEventListener('input', async (e) => {
     console.warn('[tab-out] Archive search failed:', err);
   }
 });
+
+
+/* ----------------------------------------------------------------
+   QUICK SEARCH BAR
+
+   Stands in for the browser's real address bar, which Opera can't
+   auto-focus/select after our new-tab redirect (see README: Opera
+   compatibility). Auto-focused on load; Enter navigates THIS tab —
+   straight to the URL if the input looks like one, otherwise to a
+   Google search for it.
+   ---------------------------------------------------------------- */
+
+/**
+ * looksLikeUrl(input)
+ *
+ * Heuristic: true for things like "striphtml.com", "github.com/foo",
+ * "localhost:3000", or anything already starting with a scheme.
+ * False for ordinary search phrases ("best pasta recipe").
+ */
+function looksLikeUrl(input) {
+  const value = (input || '').trim();
+  if (!value || /\s/.test(value)) return false;
+
+  // Already has a scheme (http://, https://, ftp://, etc.)
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return true;
+
+  // localhost, with or without a port
+  if (/^localhost(:\d+)?(\/.*)?$/i.test(value)) return true;
+
+  // A bare IP address, with or without a port/path
+  if (/^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(value)) return true;
+
+  // hostname.tld — at least one dot, a plausible TLD, no spaces
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/.*)?$/i.test(value);
+}
+
+/**
+ * buildQuickSearchDestination(input)
+ *
+ * Turns the raw input into a URL to navigate to: the site itself if
+ * it looks like one (adding https:// when no scheme was given), or a
+ * Google search for it otherwise.
+ */
+function buildQuickSearchDestination(input) {
+  const value = (input || '').trim();
+  if (looksLikeUrl(value)) {
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+  }
+  return `https://www.google.com/search?q=${encodeURIComponent(value)}`;
+}
+
+(function initQuickSearch() {
+  const input = document.getElementById('quickSearchInput');
+  if (!input) return;
+
+  // Auto-focus + select on load, so typing (or backspace) works right away.
+  input.focus();
+  input.select();
+
+  // Re-select whenever it regains focus, so it's always ready to type over.
+  input.addEventListener('focus', () => input.select());
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const value = input.value.trim();
+    if (!value) return;
+    // Same-tab navigation — replaces Tab Out with the destination.
+    window.location.href = buildQuickSearchDestination(value);
+  });
+})();
 
 
 /* ----------------------------------------------------------------

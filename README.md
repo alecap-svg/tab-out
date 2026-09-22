@@ -25,6 +25,7 @@ The agent will walk you through it. Takes about 1 minute.
 ## Features
 
 - **See all your tabs at a glance** on a clean grid, grouped by domain
+- **Quick search bar** in the header, auto-focused on load — type a URL or a search and hit Enter, no need to click into it first
 - **Homepages group** pulls Gmail inbox, X home, YouTube, LinkedIn, GitHub homepages into one card
 - **Close tabs with style** with swoosh sound + confetti burst
 - **Duplicate detection** flags when you have the same page open twice, with one-click cleanup

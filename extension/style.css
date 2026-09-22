@@ -81,6 +81,46 @@ header {
   text-transform: uppercase;
 }
 
+/* ---- Quick search bar (full-width row, below header) ---- */
+.header-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--warm-gray);
+  border-radius: 8px;
+  background: var(--card-bg);
+  transition: border-color 0.2s, box-shadow 0.2s;
+  margin-bottom: 16px;
+}
+
+.header-search:focus-within {
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 0 3px rgba(200, 113, 58, 0.08);
+}
+
+.header-search-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.header-search-input {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+}
+
+.header-search-input::placeholder {
+  color: var(--muted);
+}
+
 /* ---- Tab cleanup banner ---- */
 .tab-cleanup-banner {
   background: linear-gradient(135deg, rgba(200, 113, 58, 0.04), rgba(200, 113, 58, 0.09));
@@ -143,6 +183,24 @@ header {
 .tab-cleanup-btn:hover {
   opacity: 0.85;
   transform: translateY(-1px);
+}
+
+/* ---- Sage variant — used by the Resource Saver banner ---- */
+.tab-cleanup-banner.sage {
+  background: linear-gradient(135deg, rgba(90, 122, 98, 0.04), rgba(90, 122, 98, 0.09));
+  border-color: rgba(90, 122, 98, 0.18);
+}
+
+.tab-cleanup-banner.sage .tab-cleanup-icon {
+  background: rgba(90, 122, 98, 0.1);
+}
+
+.tab-cleanup-banner.sage .tab-cleanup-icon svg {
+  color: var(--accent-sage);
+}
+
+.tab-cleanup-banner.sage .tab-cleanup-btn {
+  background: var(--accent-sage);
 }
 
 /* ---- Nudge banner ---- */
@@ -449,6 +507,29 @@ header {
 .chip-close:hover {
   color: var(--status-abandoned);
   background: rgba(179, 90, 90, 0.08);
+}
+
+/* ---- Resource Saver: pause button + sleeping badge/state ---- */
+.chip-pause:hover {
+  color: var(--accent-sage);
+  background: rgba(90, 122, 98, 0.08);
+}
+
+.chip-sleep-badge {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent-sage);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.chip-sleep-badge svg {
+  width: 13px;
+  height: 13px;
+}
+
+.page-chip.chip-sleeping {
+  opacity: 0.55;
 }
 
 .page-chip.clickable {
